@@ -1,22 +1,31 @@
 """
 =====================================================================
- SPORTS SCHEDULE BOT — Versi GitHub Actions (100% GRATIS)
+ SPORTS SCHEDULE BOT — Versi GitHub Actions (100% GRATIS) — PINTAR
 =====================================================================
- - Sumber data : TheSportsDB (gratis, TANPA API key)
+ - Sumber data : TheSportsDB (gratis, TANPA API key pribadi)
  - Hosting     : GitHub Actions (gratis, tanpa kartu kredit)
- - Jadwal      : Otomatis tiap hari 08:00 WIB (diatur di
-                 .github/workflows/jadwal.yml — bukan di file ini)
+ - Jadwal      : Otomatis tiap hari 08:00 WIB
+                 (diatur di .github/workflows/jadwal.yml — bukan di sini)
  - PC/laptop boleh mati total. Semua jalan di server GitHub.
 
- Script ini jalan SEKALI per eksekusi (ambil jadwal -> kirim ->
- selesai). Tidak ada loop, tidak ada library `schedule`.
+ PERBAIKAN versi ini (vs versi lama):
+   1) AUTO-DETEKSI TURNAMEN. Bot tidak lagi mengejar daftar ID liga
+      yang di-hardcode (yang bikin World Cup tidak muncul). Sekarang
+      bot mengambil SEMUA event per cabang olahraga lalu menyaring
+      turnamen besar berdasarkan NAMA. Piala Dunia, Euro, Copa America,
+      Champions League, dll. otomatis tertangkap tanpa edit kode.
+   2) HEMAT PANGGILAN API. Cukup 1 panggilan per cabang olahraga
+      (bukan 1 per liga), jadi aman dari batas API gratis.
+   3) Pakai kunci publik "123" (kunci lama "3" sudah usang).
+
+ Script jalan SEKALI per eksekusi (ambil -> kirim -> selesai).
 =====================================================================
 """
 
 import os
 import sys
 import time
-from datetime import datetime, date, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
@@ -34,42 +43,48 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     sys.exit(1)
 
 WIB = ZoneInfo("Asia/Jakarta")
-TSDB = "https://www.thesportsdb.com/api/v1/json/3"  # key "3" = key publik gratis
-DELAY = 2  # jeda antar request (detik) agar aman dari rate limit
+
+# Kunci publik gratis TheSportsDB. Kunci lama "3" sudah usang -> pakai "123".
+TSDB_KEY = "123"
+TSDB = f"https://www.thesportsdb.com/api/v1/json/{TSDB_KEY}"
+
+DELAY = 2          # jeda antar panggilan API (detik) — aman dari rate limit
+MAX_PER_LEAGUE = 12  # maksimal pertandingan ditampilkan per liga
 
 # ============================================================
-# LIGA SEPAK BOLA (ID TheSportsDB — semua gratis)
-# Mau tambah liga? Lihat panduan di PANDUAN.md bagian "Tambah Liga"
+# CABANG OLAHRAGA YANG DIPANTAU
+# Tiap cabang = 1 panggilan API per tanggal (irit & lengkap).
+# Nama harus sesuai TheSportsDB: Soccer, Basketball, Fighting, dll.
+# Mau tambah cabang? Tambahkan di list ini (mis. "Motorsport", "Tennis").
 # ============================================================
-SOCCER_LEAGUES = {
-    "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League":        "4328",
-    "🇪🇸 La Liga":                "4335",
-    "🇩🇪 Bundesliga":             "4331",
-    "🇮🇹 Serie A":                "4332",
-    "🇫🇷 Ligue 1":                "4334",
-    "🏆 UEFA Champions League":   "4480",
-    "🏆 UEFA Europa League":      "4481",
+SPORTS = ["Soccer", "Basketball", "Fighting"]
+
+# Judul section per cabang (untuk tampilan pesan)
+SPORT_HEADER = {
+    "Soccer": "⚽ *SEPAK BOLA*",
+    "Basketball": "🏀 *BASKET*",
+    "Fighting": "🥊 *TINJU & MMA*",
 }
 
-# Liga yang ID-nya dicari otomatis berdasarkan nama (lebih aman)
-SOCCER_LEAGUES_BY_SEARCH = [
-    # (label tampilan, negara, kata kunci nama liga)
-    ("🇮🇩 Liga 1 Indonesia", "Indonesia", "liga 1"),
+# ============================================================
+# AUTO-DETEKSI TURNAMEN (berdasarkan NAMA liga, bukan ID)
+# Liga/turnamen yang namanya mengandung salah satu kata kunci di bawah
+# akan SELALU ditampilkan. Turnamen baru otomatis tertangkap.
+# ============================================================
+TOURNAMENT_KEYWORDS = [
+    "world cup", "club world cup", "champions league", "europa league",
+    "conference league", "nations league", "copa america", "copa libertadores",
+    "copa sudamericana", "european championship", "euro 20", "afcon",
+    "africa cup", "asian cup", "gold cup", "confederations", "olympic",
+    "super cup", "world championship", "grand prix", "finals",
 ]
 
-# ============================================================
-# OLAHRAGA LAIN
-# ============================================================
-OTHER_LEAGUES = {
-    "🏀 NBA":     "4387",
-    "🥋 UFC/MMA": "4443",
-    "🥊 Boxing":  "4445",   # termasuk event boxing lokal jika terdaftar
-}
-
-# Ambil SEMUA event "Fighting" hari ini (menangkap Byon Combat,
-# ONE Championship, dll yang tidak masuk daftar di atas)
-EXTRA_SPORTS = [
-    ("🥊 Fighting Lainnya (Byon Combat, ONE, dll)", "Fighting"),
+# Liga reguler favorit (tetap tampil walau bukan turnamen)
+FAVORITE_KEYWORDS = [
+    "premier league", "la liga", "serie a", "bundesliga", "ligue 1",
+    "eredivisie", "primeira liga", "liga 1", "mls",          # bola
+    "nba", "euroleague",                                     # basket
+    "ufc", "one championship", "byon", "pfl", "bellator", "boxing",  # fighting
 ]
 
 
@@ -78,20 +93,30 @@ EXTRA_SPORTS = [
 # ============================================================
 def get_json(url: str) -> dict:
     """GET request dengan retry sederhana."""
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             r = requests.get(url, timeout=15)
             if r.status_code == 200:
-                return r.json()
-            print(f"   ⚠️ HTTP {r.status_code} -> retry {attempt + 1}/3")
+                return r.json() or {}
+            print(f"   ⚠️ HTTP {r.status_code} -> retry {attempt + 1}/2")
         except Exception as e:
-            print(f"   ⚠️ {e} -> retry {attempt + 1}/3")
+            print(f"   ⚠️ {e} -> retry {attempt + 1}/2")
         time.sleep(3)
     return {}
 
 
+def classify_league(name: str) -> int:
+    """0 = turnamen besar, 1 = liga favorit, 2 = lainnya."""
+    low = (name or "").lower()
+    if any(k in low for k in TOURNAMENT_KEYWORDS):
+        return 0
+    if any(k in low for k in FAVORITE_KEYWORDS):
+        return 1
+    return 2
+
+
 def format_event(ev: dict) -> str:
-    """Ubah 1 event TheSportsDB jadi 1 baris teks rapi (waktu WIB)."""
+    """Ubah 1 event jadi 1 baris teks rapi (waktu WIB)."""
     home = ev.get("strHomeTeam") or ""
     away = ev.get("strAwayTeam") or ""
     title = f"{home} vs {away}" if home and away else (ev.get("strEvent") or "?")
@@ -101,7 +126,6 @@ def format_event(ev: dict) -> str:
     if score_h not in (None, "") and score_a not in (None, ""):
         return f"  ✅ {home} {score_h}–{score_a} {away} (Selesai)"
 
-    # Konversi waktu UTC -> WIB
     ts = ev.get("strTimestamp")  # contoh: "2026-06-13T19:00:00"
     if ts:
         try:
@@ -109,33 +133,28 @@ def format_event(ev: dict) -> str:
                 tzinfo=timezone.utc
             )
             wib = utc_dt.astimezone(WIB)
-            return f"  🕐 {wib.strftime('%H:%M')} WIB | {title}"
+            return f"  🕐 {wib.strftime('%a %d/%m %H:%M')} WIB | {title}"
         except Exception:
             pass
     t = ev.get("strTime") or "TBD"
     return f"  🕐 {t} | {title}"
 
 
-def events_today_by_league(league_id: str) -> list[dict]:
-    today = date.today().strftime("%Y-%m-%d")
-    data = get_json(f"{TSDB}/eventsday.php?d={today}&l={league_id}")
-    return data.get("events") or []
-
-
-def events_today_by_sport(sport: str) -> list[dict]:
-    today = date.today().strftime("%Y-%m-%d")
-    data = get_json(f"{TSDB}/eventsday.php?d={today}&s={sport}")
-    return data.get("events") or []
-
-
-def find_league_id(country: str, keyword: str) -> str | None:
-    """Cari ID liga otomatis berdasarkan negara + kata kunci nama."""
-    data = get_json(f"{TSDB}/search_all_leagues.php?c={country}&s=Soccer")
-    for lg in (data.get("countries") or data.get("countrys") or []):
-        name = (lg.get("strLeague") or "").lower()
-        if keyword.lower() in name:
-            return lg.get("idLeague")
-    return None
+def fetch_sport_window(sport: str, dates: list[str]) -> list[dict]:
+    """Ambil semua event satu cabang olahraga untuk daftar tanggal (WIB).
+    Dedupe berdasarkan idEvent."""
+    seen, out = set(), []
+    for d in dates:
+        data = get_json(f"{TSDB}/eventsday.php?d={d}&s={sport}")
+        for ev in (data.get("events") or []):
+            eid = ev.get("idEvent")
+            if eid and eid in seen:
+                continue
+            if eid:
+                seen.add(eid)
+            out.append(ev)
+        time.sleep(DELAY)
+    return out
 
 
 # ============================================================
@@ -148,57 +167,50 @@ def build_message() -> str:
         "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu",
         "Sunday": "Minggu",
     }[now.strftime("%A")]
+
+    # Jendela: hari ini + besok (WIB) -> menangkap laga lintas tengah malam
+    dates = [(now + timedelta(days=i)).strftime("%Y-%m-%d") for i in (0, 1)]
+
     lines = [
         "🏟️ *JADWAL OLAHRAGA HARI INI*",
         f"📅 {hari}, {now.strftime('%d %B %Y')}",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    # ---------- SEPAK BOLA ----------
-    lines.append("\n⚽ *SEPAK BOLA*")
-    any_soccer = False
+    for sport in SPORTS:
+        lines.append(f"\n{SPORT_HEADER.get(sport, sport)}")
+        events = fetch_sport_window(sport, dates)
 
-    soccer = dict(SOCCER_LEAGUES)
-    for label, country, keyword in SOCCER_LEAGUES_BY_SEARCH:
-        lid = find_league_id(country, keyword)
-        if lid:
-            soccer[label] = lid
-        time.sleep(DELAY)
+        # Kelompokkan per liga
+        by_league: dict[str, list[dict]] = {}
+        for ev in events:
+            lg = ev.get("strLeague") or "Lainnya"
+            by_league.setdefault(lg, []).append(ev)
 
-    for name, lid in soccer.items():
-        evs = events_today_by_league(lid)
-        time.sleep(DELAY)
-        if evs:
-            any_soccer = True
-            lines.append(f"\n{name}")
-            lines += [format_event(e) for e in evs[:8]]
-    if not any_soccer:
-        lines.append("  Tidak ada pertandingan hari ini")
+        # Untuk Soccer: hanya tampilkan turnamen + liga favorit (hindari spam
+        # ratusan laga liga kecil sedunia). Cabang lain: tampilkan semua.
+        keep_others = sport != "Soccer"
 
-    # ---------- NBA / UFC / BOXING ----------
-    for name, lid in OTHER_LEAGUES.items():
-        lines.append(f"\n{name}")
-        evs = events_today_by_league(lid)
-        time.sleep(DELAY)
-        if evs:
-            lines += [format_event(e) for e in evs[:8]]
-        else:
-            lines.append("  Tidak ada event hari ini")
+        ranked = []
+        for lg, evs in by_league.items():
+            rank = classify_league(lg)
+            if rank == 2 and not keep_others:
+                continue
+            ranked.append((rank, lg, evs))
+        ranked.sort(key=lambda x: (x[0], x[1]))  # turnamen dulu, lalu abjad
 
-    # ---------- FIGHTING LAINNYA ----------
-    known_fight_ids = set(OTHER_LEAGUES.values())
-    for name, sport in EXTRA_SPORTS:
-        evs = events_today_by_sport(sport)
-        time.sleep(DELAY)
-        evs = [e for e in evs if e.get("idLeague") not in known_fight_ids]
-        if evs:
-            lines.append(f"\n{name}")
-            for e in evs[:8]:
-                liga = e.get("strLeague") or ""
-                lines.append(format_event(e) + (f"  _({liga})_" if liga else ""))
+        if not ranked:
+            lines.append("  Tidak ada pertandingan")
+            continue
+
+        for rank, lg, evs in ranked:
+            tag = "🏆 " if rank == 0 else ""
+            lines.append(f"\n{tag}_{lg}_")
+            for ev in evs[:MAX_PER_LEAGUE]:
+                lines.append(format_event(ev))
 
     lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-    lines.append("_Dikirim otomatis via GitHub Actions_ 🤖")
+    lines.append("_Sumber: TheSportsDB • Dikirim otomatis via GitHub Actions_ 🤖")
     return "\n".join(lines)
 
 
