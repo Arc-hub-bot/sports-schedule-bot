@@ -124,7 +124,7 @@ def format_event(ev: dict) -> str:
     score_h = ev.get("intHomeScore")
     score_a = ev.get("intAwayScore")
     if score_h not in (None, "") and score_a not in (None, ""):
-        return f"  ✅ {home} {score_h}–{score_a} {away} (Selesai)"
+        return f"✅ {home} {score_h}–{score_a} {away}\n     (Selesai)"
 
     ts = ev.get("strTimestamp")  # contoh: "2026-06-13T19:00:00"
     if ts:
@@ -133,11 +133,11 @@ def format_event(ev: dict) -> str:
                 tzinfo=timezone.utc
             )
             wib = utc_dt.astimezone(WIB)
-            return f"  🕐 {wib.strftime('%a %d/%m %H:%M')} WIB | {title}"
+            return f"🕐 {wib.strftime('%a %d/%m')} • {wib.strftime('%H:%M')} WIB\n     {title}"
         except Exception:
             pass
     t = ev.get("strTime") or "TBD"
-    return f"  🕐 {t} | {title}"
+    return f"🕐 {t} WIB\n     {title}"
 
 
 def fetch_sport_window(sport: str, dates: list[str]) -> list[dict]:
@@ -174,11 +174,13 @@ def build_message() -> str:
     lines = [
         "🏟️ *JADWAL OLAHRAGA HARI INI*",
         f"📅 {hari}, {now.strftime('%d %B %Y')}",
-        "━━━━━━━━━━━━━━━━━━━━",
+        "═══════════════════════",
     ]
 
     for sport in SPORTS:
-        lines.append(f"\n{SPORT_HEADER.get(sport, sport)}")
+        lines.append("")
+        lines.append(f"{SPORT_HEADER.get(sport, sport)}")
+        lines.append("───────────────────────")
         events = fetch_sport_window(sport, dates)
 
         # Kelompokkan per liga
@@ -200,16 +202,17 @@ def build_message() -> str:
         ranked.sort(key=lambda x: (x[0], x[1]))  # turnamen dulu, lalu abjad
 
         if not ranked:
-            lines.append("  Tidak ada pertandingan")
+            lines.append("Tidak ada pertandingan")
             continue
 
         for rank, lg, evs in ranked:
-            tag = "🏆 " if rank == 0 else ""
-            lines.append(f"\n{tag}_{lg}_")
+            tag = "🏆 " if rank == 0 else "▪️ "
+            lines.append(f"\n{tag}*{lg}*")
             for ev in evs[:MAX_PER_LEAGUE]:
                 lines.append(format_event(ev))
+                lines.append("")
 
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
+    lines.append("═══════════════════════")
     lines.append("_Sumber: TheSportsDB • Dikirim otomatis via GitHub Actions_ 🤖")
     return "\n".join(lines)
 
