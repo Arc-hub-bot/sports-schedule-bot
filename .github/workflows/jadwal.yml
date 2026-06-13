@@ -1,0 +1,29 @@
+name: Kirim Jadwal Olahraga
+
+on:
+  schedule:
+    # 01:00 UTC = 08:00 WIB (GitHub pakai waktu UTC, bukan WIB!)
+    - cron: "0 1 * * *"
+  workflow_dispatch: {}   # tombol "Run workflow" manual untuk testing
+
+jobs:
+  kirim-jadwal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Ambil kode dari repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Jalankan bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python sports_bot.py
