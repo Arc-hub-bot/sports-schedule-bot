@@ -3,6 +3,7 @@
  SPORTS SCHEDULE BOT — Versi GitHub Actions (100% GRATIS) — PINTAR
 =====================================================================
  - Sumber data : TheSportsDB (gratis, TANPA API key pribadi)
+                 + ESPN (gratis, tanpa key) sebagai CADANGAN khusus UFC
  - Hosting     : GitHub Actions (gratis, tanpa kartu kredit)
  - Jadwal      : Otomatis tiap hari 08:00 WIB
                  (diatur di .github/workflows/jadwal.yml — bukan di sini)
@@ -17,6 +18,13 @@
    2) HEMAT PANGGILAN API. Cukup 1 panggilan per cabang olahraga
       (bukan 1 per liga), jadi aman dari batas API gratis.
    3) Pakai kunci publik "123" (kunci lama "3" sudah usang).
+   4) SUMBER GANDA UNTUK FIGHTING/UFC. Kalau TheSportsDB tidak punya
+      event UFC untuk jendela tanggal ini, bot otomatis ambil dari
+      ESPN (gratis, tanpa key) sebagai cadangan — supaya event UFC
+      spesial (mis. "UFC White House") tidak terlewat.
+   5) TIMNAS INDONESIA. Kalau Timnas Indonesia bermain di kompetisi
+      apa pun (kualifikasi Piala Dunia, Piala AFF, friendly, dll),
+      laganya tetap ditampilkan meski nama liganya tidak dikenal bot.
 
  Script jalan SEKALI per eksekusi (ambil -> kirim -> selesai).
 =====================================================================
@@ -47,6 +55,9 @@ WIB = ZoneInfo("Asia/Jakarta")
 # Kunci publik gratis TheSportsDB. Kunci lama "3" sudah usang -> pakai "123".
 TSDB_KEY = "123"
 TSDB = f"https://www.thesportsdb.com/api/v1/json/{TSDB_KEY}"
+
+# ESPN — API publik gratis tanpa key, dipakai sebagai CADANGAN untuk UFC
+ESPN_UFC_URL = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard"
 
 DELAY = 2          # jeda antar panggilan API (detik) — aman dari rate limit
 MAX_PER_LEAGUE = 12  # maksimal pertandingan ditampilkan per liga
@@ -85,6 +96,15 @@ FAVORITE_KEYWORDS = [
     "eredivisie", "primeira liga", "liga 1", "mls",          # bola
     "nba", "euroleague",                                     # basket
     "ufc", "one championship", "byon", "pfl", "bellator", "boxing",  # fighting
+    "real american freestyle",  # RAF (gulat) — tampil kalau TheSportsDB
+                                 # suatu saat mendata promosi ini
+]
+
+# Tim yang SELALU ditampilkan kalau bermain, di kompetisi apa pun
+# (mis. Timnas Indonesia main di kualifikasi Piala Dunia/Piala AFF, yang
+# nama liganya belum tentu mengandung kata "Indonesia")
+WATCH_TEAMS = [
+    "indonesia",
 ]
 
 
@@ -113,6 +133,14 @@ def classify_league(name: str) -> int:
     if any(k in low for k in FAVORITE_KEYWORDS):
         return 1
     return 2
+
+
+def is_watched_team(ev: dict) -> bool:
+    """True kalau salah satu tim di event ini ada di WATCH_TEAMS
+    (mis. Timnas Indonesia), apa pun nama liganya."""
+    home = (ev.get("strHomeTeam") or "").lower()
+    away = (ev.get("strAwayTeam") or "").lower()
+    return any(t in home or t in away for t in WATCH_TEAMS)
 
 
 def format_event(ev: dict) -> str:
@@ -157,6 +185,46 @@ def fetch_sport_window(sport: str, dates: list[str]) -> list[dict]:
     return out
 
 
+def fetch_espn_ufc(dates: list[str]) -> list[dict]:
+    """CADANGAN khusus UFC dari ESPN (gratis, tanpa key).
+    ESPN menyediakan daftar SELURUH event UFC musim ini di field
+    'calendar' (1x panggilan untuk semua tanggal). Kita ambil event
+    yang tanggalnya (dikonversi ke WIB) ada di jendela 'dates'."""
+    out = []
+    data = get_json(ESPN_UFC_URL)
+    leagues = data.get("leagues") or []
+    calendar = (leagues[0].get("calendar") if leagues else []) or []
+
+    for item in calendar:
+        start = item.get("startDate")  # contoh: "2026-06-15T03:00Z"
+        if not start:
+            continue
+        try:
+            dt_utc = datetime.fromisoformat(start.replace("Z", "")).replace(
+                tzinfo=timezone.utc
+            )
+            ev_date_wib = dt_utc.astimezone(WIB).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+
+        if ev_date_wib not in dates:
+            continue
+
+        out.append({
+            "idEvent": f"espn-ufc-{item.get('label')}",
+            "strEvent": item.get("label") or "UFC Event",
+            "strHomeTeam": "",
+            "strAwayTeam": "",
+            "strLeague": "UFC",
+            "strTimestamp": start.replace("Z", ""),
+            "intHomeScore": None,
+            "intAwayScore": None,
+        })
+
+    time.sleep(DELAY)
+    return out
+
+
 # ============================================================
 # BANGUN PESAN
 # ============================================================
@@ -183,6 +251,16 @@ def build_message() -> str:
         lines.append("───────────────────────")
         events = fetch_sport_window(sport, dates)
 
+        # CADANGAN: kalau cabang Fighting dan TheSportsDB belum punya
+        # event UFC untuk jendela ini, coba ambil dari ESPN.
+        if sport == "Fighting":
+            has_ufc = any("ufc" in (ev.get("strLeague") or "").lower() for ev in events)
+            if not has_ufc:
+                espn_events = fetch_espn_ufc(dates)
+                if espn_events:
+                    print(f"   ℹ️ +{len(espn_events)} event UFC dari ESPN (cadangan)")
+                events.extend(espn_events)
+
         # Kelompokkan per liga
         by_league: dict[str, list[dict]] = {}
         for ev in events:
@@ -196,8 +274,19 @@ def build_message() -> str:
         ranked = []
         for lg, evs in by_league.items():
             rank = classify_league(lg)
+
+            if rank == 2 and sport == "Soccer":
+                # Liga/turnamen ini bukan favorit untuk Sepak Bola.
+                # Tapi kalau Timnas Indonesia (atau tim di WATCH_TEAMS)
+                # bermain di sini, tetap tampilkan laga itu saja.
+                watched = [ev for ev in evs if is_watched_team(ev)]
+                if watched:
+                    ranked.append((1, lg, watched))
+                continue
+
             if rank == 2 and not keep_others:
                 continue
+
             ranked.append((rank, lg, evs))
         ranked.sort(key=lambda x: (x[0], x[1]))  # turnamen dulu, lalu abjad
 
@@ -213,7 +302,7 @@ def build_message() -> str:
                 lines.append("")
 
     lines.append("═══════════════════════")
-    lines.append("_Sumber: TheSportsDB • Dikirim otomatis via GitHub Actions_ 🤖")
+    lines.append("_Sumber: TheSportsDB + ESPN • Dikirim otomatis via GitHub Actions_ 🤖")
     return "\n".join(lines)
 
 
