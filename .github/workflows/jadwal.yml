@@ -1,13 +1,23 @@
 name: Kirim Jadwal Olahraga
- 
+
 on:
-  schedule:
-    # 01:07 UTC = 08:07 WIB
-    # Sengaja ":07" (bukan ":00") -> hindari jam padat top-of-hour
-    # di server GitHub Actions, supaya run lebih jarang delay/skip.
-    - cron: "7 1 * * *"
-  workflow_dispatch: {}   # tombol "Run workflow" manual untuk testing
- 
+  # SENGAJA TIDAK PAKAI 'schedule:' DI SINI.
+  # GitHub 'schedule' tidak presisi (resmi dari dokumentasi GitHub: bisa
+  # delay 5-60 menit, bahkan di-drop total saat server sedang sibuk) ->
+  # tidak bisa menjamin jendela 08:00-08:30 WIB.
+  #
+  # Satu-satunya pemicu bot ini adalah PANGGILAN API EKSTERNAL dari
+  # cron-job.org (gratis) yang memanggil 'workflow_dispatch' di bawah,
+  # tepat jam 01:00 UTC (08:00 WIB) -> presisi ke hitungan detik karena
+  # ini panggilan API langsung, bukan antrian penjadwal GitHub.
+  #
+  # SENGAJA tidak ditambahkan 'schedule:' sebagai cadangan -> kalau ada
+  # 'schedule:' DAN 'workflow_dispatch' aktif bersamaan, bot akan
+  # mengirim pesan DUA KALI tiap hari (sekali dari masing-masing
+  # pemicu). Lihat PANDUAN.md bagian "Jaring Pengaman" untuk cara
+  # memantau kegagalan tanpa menimbulkan duplikat.
+  workflow_dispatch: {}   # dipicu manual (tombol) ATAU oleh cron-job.org via API
+
 jobs:
   kirim-jadwal:
     runs-on: ubuntu-latest
@@ -15,15 +25,15 @@ jobs:
     steps:
       - name: Ambil kode dari repo
         uses: actions/checkout@v4
- 
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
- 
+
       - name: Install dependencies
         run: pip install -r requirements.txt
- 
+
       - name: Jalankan bot
         env:
           # ⚠️ Sisi KANAN harus PERSIS sama dengan nama Secret di GitHub.
