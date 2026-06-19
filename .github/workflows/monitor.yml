@@ -1,0 +1,58 @@
+name: Jaring Pengaman (Cadangan 08:35 WIB)
+
+on:
+  # Dipanggil oleh cron-job.org jam 01:35 UTC (08:35 WIB) — 35 menit
+  # setelah pemicu utama. Workflow ini CEK DULU apakah bot sudah kirim
+  # hari ini. Kalau sudah -> skip (tidak duplikat). Kalau belum -> jalankan
+  # bot sebagai cadangan.
+  workflow_dispatch: {}
+
+jobs:
+  cek-dan-kirim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Cek apakah bot sudah jalan hari ini
+        id: cek
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          echo "📅 Mengecek run sukses jadwal.yml pada $TODAY (UTC)..."
+
+          RUNS=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/jadwal.yml/runs?created=%3E%3D${TODAY}T00:00:00Z&status=success&per_page=1")
+
+          COUNT=$(echo "$RUNS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total_count',0))")
+          echo "   Jumlah run sukses hari ini: $COUNT"
+
+          if [ "$COUNT" -gt "0" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "✅ Bot SUDAH jalan hari ini — skip, tidak kirim ulang."
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Bot BELUM jalan hari ini — akan kirim sekarang sebagai cadangan."
+          fi
+
+      - name: Ambil kode dari repo
+        if: steps.cek.outputs.skip == 'false'
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        if: steps.cek.outputs.skip == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        if: steps.cek.outputs.skip == 'false'
+        run: pip install -r requirements.txt
+
+      - name: Jalankan bot (cadangan)
+        if: steps.cek.outputs.skip == 'false'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          echo "🔄 Menjalankan bot sebagai CADANGAN (pemicu utama 08:00 gagal)..."
+          python sports_bot.py
