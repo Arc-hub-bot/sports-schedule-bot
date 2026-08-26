@@ -34,6 +34,31 @@
       maupun ESPN (mis. promotor combat sport lokal seperti Byon
       Combat). Tinggal tambah/edit list ini untuk memasukkan event
       semacam itu secara manual.
+   9) BARU — CABANG BULU TANGKIS & RUGBY ditambahkan (TheSportsDB punya
+      kategori sport untuk keduanya). Bulu tangkis diberi filter yang
+      sama seperti Sepak Bola (hanya turnamen besar + laga Timnas
+      Indonesia) karena volume laga hariannya juga sangat besar
+      (banyak babak penyisihan). Rugby ditampilkan semua seperti Basket.
+  10) BARU — WATCH_TEAMS (Timnas Indonesia) sekarang berlaku juga di
+      Bulu Tangkis, tidak cuma Sepak Bola. CATATAN: untuk nomor
+      tunggal/ganda, TheSportsDB kadang mencatat nama PEMAIN, bukan
+      "Indonesia" sebagai tim -- jadi deteksi ini paling akurat untuk
+      format beregu (Piala Thomas/Uber/Sudirman).
+  11) CATATAN TENTANG PON: Setelah dicek, PON (Pekan Olahraga Nasional)
+      TIDAK terindeks di TheSportsDB maupun ESPN -- ini event domestik
+      Indonesia, di luar cakupan kedua sumber data gratis ini. Kalau
+      ada laga PON spesifik yang mau ditampilkan, tambahkan manual ke
+      MANUAL_EVENTS di bawah.
+  12) BARU — 4 CABANG POPULER TAMBAHAN: Tenis, Cricket, Motorsport
+      (F1/MotoGP/dll), Voli. Tenis & Cricket diberi filter ketat
+      (RESTRICTED_SPORTS) karena volume laga hariannya sangat besar
+      (ratusan match ATP/WTA/liga T20 tersebar di seluruh dunia).
+      Motorsport & Voli ditampilkan apa adanya (volume jauh lebih
+      kecil/terkendali).
+  13) BARU — TINJU (BOXING) DIPISAH DARI MMA: dalam satu section
+      "TINJU & MMA", sekarang ada 2 sub-judul terpisah: "Tinju (Boxing)"
+      dan "MMA & Combat Sports Lain" (UFC/ONE/Byon/dll), supaya tidak
+      bercampur dalam satu daftar panjang.
 
  Script jalan SEKALI per eksekusi (ambil -> kirim -> selesai).
 =====================================================================
@@ -75,13 +100,27 @@ MAX_PER_LEAGUE = 12  # maksimal pertandingan ditampilkan per liga
 # ============================================================
 # CABANG OLAHRAGA YANG DIPANTAU
 # ============================================================
-SPORTS = ["Soccer", "Basketball", "Fighting"]
+SPORTS = ["Soccer", "Basketball", "Fighting", "Badminton", "Rugby",
+          "Tennis", "Cricket", "Motorsport", "Volleyball"]
 
 SPORT_HEADER = {
     "Soccer": "⚽ *SEPAK BOLA*",
     "Basketball": "🏀 *BASKET*",
     "Fighting": "🥊 *TINJU & MMA*",
+    "Badminton": "🏸 *BULU TANGKIS*",
+    "Rugby": "🏉 *RUGBY*",
+    "Tennis": "🎾 *TENIS*",
+    "Cricket": "🏏 *CRICKET*",
+    "Motorsport": "🏎️ *MOTORSPORT (F1/MotoGP/dll)*",
+    "Volleyball": "🏐 *VOLI*",
 }
+
+# Cabang dengan volume laga harian sangat besar (banyak babak penyisihan
+# tersebar di banyak liga/turnamen kecil sedunia) -> hanya tampilkan
+# turnamen besar + liga favorit + laga tim yang dipantau (WATCH_TEAMS).
+# Cabang lain (Basket, Fighting, Rugby, Motorsport, Voli) ditampilkan
+# apa adanya karena volume hariannya jauh lebih kecil/terkendali.
+RESTRICTED_SPORTS = {"Soccer", "Badminton", "Tennis", "Cricket"}
 
 # ============================================================
 # AUTO-DETEKSI TURNAMEN (berdasarkan NAMA liga, bukan ID)
@@ -92,6 +131,9 @@ TOURNAMENT_KEYWORDS = [
     "copa sudamericana", "european championship", "euro 20", "afcon",
     "africa cup", "asian cup", "gold cup", "confederations", "olympic",
     "super cup", "world championship", "grand prix", "finals",
+    "sea games", "asian games",  # ajang multi-cabang (Soccer/Basket di sini
+                                  # otomatis ikut tertangkap; cabang lain di
+                                  # ajang ini di luar cakupan bot -> lihat catatan 9)
 ]
 
 FAVORITE_KEYWORDS = [
@@ -100,6 +142,17 @@ FAVORITE_KEYWORDS = [
     "nba", "euroleague",                                     # basket
     "ufc", "one championship", "byon", "pfl", "bellator", "boxing",  # fighting
     "real american freestyle",
+    "bwf", "all england", "thomas cup", "uber cup", "sudirman cup",
+    "indonesia open", "china open", "denmark open", "malaysia open",
+    "india open", "japan open", "world tour finals",          # bulu tangkis
+    "six nations", "rugby championship", "super rugby", "top 14",
+    "premiership rugby", "united rugby championship",         # rugby
+    # "rugby world cup" otomatis ikut TOURNAMENT_KEYWORDS ("world cup")
+    "atp", "wta", "wimbledon", "us open", "french open",
+    "roland garros", "australian open",                       # tenis
+    "ipl", "big bash", "the ashes", "icc", "psl", "t20",       # cricket
+    "formula 1", "formula e", "motogp", "nascar", "indycar",   # motorsport
+    "fivb", "volleyball nations league", "cev champions league",  # voli
 ]
 
 WATCH_TEAMS = [
@@ -419,8 +472,8 @@ def build_message() -> str:
         # MANUAL: event yang tidak ada di API mana pun (mis. Byon Combat)
         events.extend(get_manual_events(sport, keep_dates))
 
-        if sport == "Soccer":
-            print(f"   ℹ️ Soccer: {len(events)} event (query={query_dates}, keep={sorted(keep_dates)})")
+        if sport in RESTRICTED_SPORTS:
+            print(f"   ℹ️ {sport}: {len(events)} event (query={query_dates}, keep={sorted(keep_dates)})")
             for ev in events:
                 lg = ev.get("strLeague") or ""
                 if any(k in lg.lower() for k in TOURNAMENT_KEYWORDS):
@@ -431,13 +484,15 @@ def build_message() -> str:
             lg = ev.get("strLeague") or "Lainnya"
             by_league.setdefault(lg, []).append(ev)
 
-        keep_others = sport != "Soccer"
+        keep_others = sport not in RESTRICTED_SPORTS
 
         ranked = []
         for lg, evs in by_league.items():
             rank = classify_league(lg)
 
-            if rank == 2 and sport == "Soccer":
+            if rank == 2 and sport in RESTRICTED_SPORTS:
+                # Liga/turnamen ini bukan favorit -> hanya tampilkan kalau
+                # tim yang dipantau (mis. Timnas Indonesia) bermain di sini.
                 watched = [ev for ev in evs if is_watched_team(ev)]
                 if watched:
                     ranked.append((1, lg, watched))
@@ -453,12 +508,36 @@ def build_message() -> str:
             lines.append("Tidak ada pertandingan")
             continue
 
-        for rank, lg, evs in ranked:
-            tag = "🏆 " if rank == 0 else "▪️ "
-            lines.append(f"\n{tag}*{lg}*")
-            for ev in evs[:MAX_PER_LEAGUE]:
-                lines.append(format_event(ev))
-                lines.append("")
+        if sport == "Fighting":
+            # Pisahkan tampilan: Tinju (Boxing) vs MMA & Combat Sports lain,
+            # supaya tidak campur aduk dalam satu daftar panjang.
+            boxing_ranked = [r for r in ranked if "boxing" in r[1].lower()]
+            mma_ranked = [r for r in ranked if "boxing" not in r[1].lower()]
+
+            if boxing_ranked:
+                lines.append("\n🥊 *Tinju (Boxing)*")
+                for rank, lg, evs in boxing_ranked:
+                    tag = "🏆 " if rank == 0 else "▪️ "
+                    lines.append(f"\n{tag}*{lg}*")
+                    for ev in evs[:MAX_PER_LEAGUE]:
+                        lines.append(format_event(ev))
+                        lines.append("")
+
+            if mma_ranked:
+                lines.append("\n🤼 *MMA & Combat Sports Lain*")
+                for rank, lg, evs in mma_ranked:
+                    tag = "🏆 " if rank == 0 else "▪️ "
+                    lines.append(f"\n{tag}*{lg}*")
+                    for ev in evs[:MAX_PER_LEAGUE]:
+                        lines.append(format_event(ev))
+                        lines.append("")
+        else:
+            for rank, lg, evs in ranked:
+                tag = "🏆 " if rank == 0 else "▪️ "
+                lines.append(f"\n{tag}*{lg}*")
+                for ev in evs[:MAX_PER_LEAGUE]:
+                    lines.append(format_event(ev))
+                    lines.append("")
 
     lines.append("═══════════════════════")
     lines.append("_Sumber: TheSportsDB + ESPN • Dikirim otomatis via GitHub Actions_ 🤖")
