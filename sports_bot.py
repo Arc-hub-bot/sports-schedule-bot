@@ -45,7 +45,7 @@ ESPN_UFC_URL = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard
 
 # ESPN sepak bola: 1 panggilan per liga (rentang tanggal)
 ESPN_SOCCER_URL = (
-    "https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard?dates={rng}"
+    "https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard?dates={d}"
 )
 # Nama liga sengaja mengandung kata kunci di FAVORITE/TOURNAMENT_KEYWORDS
 ESPN_SOCCER_LEAGUES = {
@@ -60,7 +60,8 @@ ESPN_SOCCER_LEAGUES = {
     "idn.1": "Indonesian Liga 1",
 }
 
-DELAY = 2            # jeda antar panggilan API (detik)
+DELAY = 2            # jeda antar panggilan TSDB (detik)
+ESPN_DELAY = 0.5     # jeda antar panggilan ESPN (detik)
 MAX_PER_LEAGUE = 12  # maksimal pertandingan ditampilkan per liga
 
 # ============================================================
@@ -171,6 +172,25 @@ def format_event(ev: dict) -> str:
     return f"🕐 {t} WIB\n     {title}"
 
 
+def _tokens(name: str) -> set[str]:
+    stop = {"fc", "afc", "cf", "sc", "ac", "as", "the"}
+    return {w for w in "".join(c if c.isalnum() else " " for c in (name or "").lower()).split() if w not in stop}
+
+
+def _dup_of_any(ev: dict, others: list[dict]) -> bool:
+    """True kalau 'ev' adalah laga yang sama dengan salah satu event di 'others'."""
+    d = event_wib_date(ev)
+    h, a = _tokens(ev.get("strHomeTeam")), _tokens(ev.get("strAwayTeam"))
+    if not h or not a:
+        return False
+    for o in others:
+        if event_wib_date(o) != d:
+            continue
+        if h & _tokens(o.get("strHomeTeam")) and a & _tokens(o.get("strAwayTeam")):
+            return True
+    return False
+
+
 def fetch_sport_window(sport: str, query_dates: list[str], keep_dates: set[str]) -> list[dict]:
     """Ambil event TSDB untuk tanggal QUERY, simpan hanya yang tanggal
     WIB-nya ada di KEEP_DATES. Dedupe berdasarkan idEvent."""
@@ -231,36 +251,39 @@ def fetch_espn_ufc(keep_dates: set[str]) -> list[dict]:
 
 
 def fetch_espn_soccer(query_dates: list[str], keep_dates: set[str]) -> list[dict]:
-    """CADANGAN SEPAK BOLA dari ESPN. 1 panggilan per liga (rentang tanggal),
-    lalu disaring ulang berdasarkan tanggal WIB asli."""
-    rng = f"{query_dates[0].replace('-', '')}-{query_dates[-1].replace('-', '')}"
+    """SUMBER SEPAK BOLA dari ESPN. 1 panggilan per liga PER TANGGAL
+    (?dates=YYYYMMDD), lalu disaring ulang berdasarkan tanggal WIB asli.
+    Catatan: tanpa parameter dates, ESPN mengembalikan hari acak/terdekat,
+    jadi parameter dates WAJIB."""
     out, seen = [], set()
     for slug, lname in ESPN_SOCCER_LEAGUES.items():
-        data = get_json(ESPN_SOCCER_URL.format(slug=slug, rng=rng))
-        for e in (data.get("events") or []):
-            eid = f"espn-{e.get('id')}"
-            ts = (e.get("date") or "").replace("Z", "")
-            if eid in seen or event_wib_date({"strTimestamp": ts}) not in keep_dates:
-                continue
-            seen.add(eid)
+        for d in query_dates:
+            data = get_json(ESPN_SOCCER_URL.format(slug=slug, d=d.replace("-", "")))
+            for e in (data.get("events") or []):
+                eid = f"espn-{e.get('id')}"
+                ts = (e.get("date") or "").replace("Z", "")
+                if eid in seen or event_wib_date({"strTimestamp": ts}) not in keep_dates:
+                    continue
+                seen.add(eid)
 
-            comp = (e.get("competitions") or [{}])[0]
-            teams = {c.get("homeAway"): c for c in (comp.get("competitors") or [])}
-            done = ((e.get("status") or {}).get("type") or {}).get("completed")
-            home_c = teams.get("home") or {}
-            away_c = teams.get("away") or {}
+                comp = (e.get("competitions") or [{}])[0]
+                teams = {c.get("homeAway"): c for c in (comp.get("competitors") or [])}
+                status_type = (e.get("status") or {}).get("type") or {}
+                done = status_type.get("completed")
+                home_c = teams.get("home") or {}
+                away_c = teams.get("away") or {}
 
-            out.append({
-                "idEvent": eid,
-                "strEvent": e.get("name") or "",
-                "strHomeTeam": (home_c.get("team") or {}).get("displayName", ""),
-                "strAwayTeam": (away_c.get("team") or {}).get("displayName", ""),
-                "strLeague": lname,
-                "strTimestamp": ts,
-                "intHomeScore": home_c.get("score") if done else None,
-                "intAwayScore": away_c.get("score") if done else None,
-            })
-        time.sleep(DELAY)
+                out.append({
+                    "idEvent": eid,
+                    "strEvent": e.get("name") or "",
+                    "strHomeTeam": (home_c.get("team") or {}).get("displayName", ""),
+                    "strAwayTeam": (away_c.get("team") or {}).get("displayName", ""),
+                    "strLeague": lname,
+                    "strTimestamp": ts,
+                    "intHomeScore": home_c.get("score") if done else None,
+                    "intAwayScore": away_c.get("score") if done else None,
+                })
+            time.sleep(ESPN_DELAY)
     return out
 
 
@@ -303,17 +326,15 @@ def build_message() -> str:
                     print(f"   ℹ️ +{len(espn_events)} event UFC dari ESPN (cadangan)")
                 events.extend(espn_events)
 
-        # CADANGAN SEPAK BOLA
+        # SEPAK BOLA: ESPN dipakai untuk liga-liga besar (lebih andal),
+        # TSDB tetap dipakai untuk turnamen/liga lain & Timnas Indonesia.
         if sport == "Soccer":
             print(f"   ℹ️ Soccer: {len(events)} event dari TSDB (query={query_dates}, keep={sorted(keep_dates)})")
-            has_major = any(
-                classify_league(ev.get("strLeague")) < 2 or is_watched_team(ev)
-                for ev in events
-            )
-            if not has_major:
-                espn_ev = fetch_espn_soccer(query_dates, keep_dates)
-                print(f"   ℹ️ +{len(espn_ev)} laga Soccer dari ESPN (cadangan)")
-                events.extend(espn_ev)
+            espn_ev = fetch_espn_soccer(query_dates, keep_dates)
+            print(f"   ℹ️ Soccer: {len(espn_ev)} laga dari ESPN")
+            # buang duplikat: laga TSDB yang sama dengan laga ESPN (tanggal WIB
+            # sama + kedua tim punya kata nama yang sama) tidak dipakai lagi
+            events = [ev for ev in events if not _dup_of_any(ev, espn_ev)] + espn_ev
 
             for ev in events:
                 lg = ev.get("strLeague") or ""
