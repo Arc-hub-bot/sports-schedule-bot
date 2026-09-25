@@ -1,18 +1,37 @@
 """
 =====================================================================
- SPORTS SCHEDULE BOT — Versi GitHub Actions (100% GRATIS)
+ SPORTS SCHEDULE BOT — Versi GitHub Actions (100% GRATIS) — PINTAR
 =====================================================================
- - Sumber data : TheSportsDB (key publik "123") + ESPN (tanpa key)
- - ESPN dipakai sebagai CADANGAN untuk UFC dan SEPAK BOLA
- - Hosting     : GitHub Actions, dipicu cron-job.org (lihat jadwal.yml)
+ - Sumber data : TheSportsDB (gratis, TANPA API key pribadi)
+                 + ESPN (gratis, tanpa key) sebagai CADANGAN untuk
+                 UFC dan SEPAK BOLA
+ - Hosting     : GitHub Actions (gratis, tanpa kartu kredit)
+ - Jadwal      : Otomatis tiap hari ±08:00 WIB
+                 (diatur di .github/workflows/jadwal.yml — bukan di sini)
+ - PC/laptop boleh mati total. Semua jalan di server GitHub.
 
- PERBAIKAN versi ini:
-   7) CADANGAN ESPN UNTUK SEPAK BOLA: kalau TheSportsDB tidak
-      mengembalikan satu pun laga liga besar/turnamen/timnas, bot
-      otomatis ambil dari ESPN (EPL, La Liga, Serie A, Bundesliga,
-      Ligue 1, UCL, UEL, UECL, Liga 1 Indonesia).
-   8) get_json() sekarang mencatat kegagalan dengan jelas di log
-      (tidak lagi diam-diam menjadi "Tidak ada pertandingan").
+ PERBAIKAN versi ini (vs versi lama):
+   1) AUTO-DETEKSI TURNAMEN berdasarkan NAMA liga (World Cup, Euro,
+      Copa America, Champions League, dll. otomatis tertangkap).
+   2) HEMAT PANGGILAN API: 1 panggilan per cabang olahraga per tanggal.
+   3) Pakai kunci publik "123".
+   4) SUMBER GANDA UNTUK FIGHTING/UFC (TheSportsDB + cadangan ESPN).
+   5) TIMNAS INDONESIA selalu ditampilkan kalau bermain, di liga apa pun.
+   6) JENDELA TANGGAL AKURAT: TSDB kadang mencatat laga lewat
+      tengah malam WIB (mis. World Cup jam 03:00 WIB) di tanggal UTC
+      sebelumnya. Bot mengambil data kemarin+hari ini+besok,
+      lalu MENYARING ulang berdasarkan tanggal WIB asli tiap laga —
+      jadi laga seperti ini tidak hilang lagi.
+   7) SUMBER GANDA UNTUK SEPAK BOLA (BARU — 25 Sep 2026): TheSportsDB
+      kunci publik "123" TERBUKTI sering tidak mengembalikan data
+      sepak bola sama sekali untuk suatu tanggal (bukan cuma "kadang
+      hilang" seperti dugaan awal — bisa benar-benar KOSONG TOTAL).
+      Bot sekarang SELALU memanggil ESPN untuk daftar liga
+      favorit + turnamen utama (lihat ESPN_SOCCER_LEAGUES di bawah),
+      digabung dengan hasil TheSportsDB, dan otomatis dedupe
+      berdasarkan tim tuan rumah + tim tamu + tanggal WIB.
+
+ Script jalan SEKALI per eksekusi (ambil -> kirim -> selesai).
 =====================================================================
 """
 
@@ -25,7 +44,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 # ============================================================
-# KONFIGURASI — dari GitHub Secrets
+# KONFIGURASI — dari GitHub Secrets (di-set di repo Settings)
 # ============================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -38,48 +57,72 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
 
 WIB = ZoneInfo("Asia/Jakarta")
 
+# Kunci publik gratis TheSportsDB.
+# CATATAN: kunci "123" ini kunci TESTING milik TheSportsDB, bukan kunci
+# penuh — sering tidak mengembalikan data liga-liga besar (kadang
+# sebagian liga hilang, kadang SATU CABANG OLAHRAGA KOSONG TOTAL untuk
+# suatu tanggal). Karena itu Sepak Bola & Fighting punya cadangan ESPN
+# yang SELALU dijalankan, bukan cuma saat TSDB kosong.
 TSDB_KEY = "123"
 TSDB = f"https://www.thesportsdb.com/api/v1/json/{TSDB_KEY}"
 
+# ESPN — API publik gratis tanpa key, dipakai sebagai CADANGAN untuk
+# UFC dan Sepak Bola
 ESPN_UFC_URL = "https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard"
+ESPN_SOCCER_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard"
 
-# ESPN sepak bola: 1 panggilan per liga (rentang tanggal)
-ESPN_SOCCER_URL = (
-    "https://site.api.espn.com/apis/site/v2/sports/soccer/{slug}/scoreboard?dates={d}"
-)
-# Nama liga sengaja mengandung kata kunci di FAVORITE/TOURNAMENT_KEYWORDS
+# Liga & turnamen sepak bola yang SELALU dicek ke ESPN (kode slug ESPN).
+# Ini sengaja daftar tetap (bukan auto-deteksi seperti TSDB) karena ESPN
+# butuh 1 panggilan API per liga — daftar ini sudah mencakup semua liga
+# di FAVORITE_KEYWORDS + turnamen utama di TOURNAMENT_KEYWORDS supaya
+# nama liganya otomatis cocok dengan logika classify_league() di bawah.
+# Mau tambah liga favorit lain? Tambahkan di sini juga (cari slug-nya
+# di https://www.espn.com/soccer/scoreboard/_/league/<slug>).
 ESPN_SOCCER_LEAGUES = {
-    "eng.1": "English Premier League",
-    "esp.1": "Spanish La Liga",
-    "ita.1": "Italian Serie A",
-    "ger.1": "German Bundesliga",
-    "fra.1": "French Ligue 1",
-    "uefa.champions": "UEFA Champions League",
-    "uefa.europa": "UEFA Europa League",
-    "uefa.europa.conf": "UEFA Conference League",
-    "idn.1": "Indonesian Liga 1",
+    "Premier League": "eng.1",
+    "La Liga": "esp.1",
+    "Serie A": "ita.1",
+    "Bundesliga": "ger.1",
+    "Ligue 1": "fra.1",
+    "Eredivisie": "ned.1",
+    "Primeira Liga": "por.1",
+    "Liga 1 Indonesia": "idn.1",
+    "MLS": "usa.1",
+    "UEFA Champions League": "uefa.champions",
+    "UEFA Europa League": "uefa.europa",
+    "UEFA Europa Conference League": "uefa.europa.conf",
+    "UEFA Nations League": "uefa.nations",
+    "UEFA European Championship": "uefa.euro",
+    "FIFA World Cup": "fifa.world",
+    "Copa America": "conmebol.america",
+    "CONCACAF Gold Cup": "concacaf.gold",
+    "Africa Cup of Nations": "caf.nations",
+    "AFC Asian Cup": "afc.asiancup",
 }
 
-DELAY = 2            # jeda antar panggilan TSDB (detik)
-ESPN_DELAY = 0.5     # jeda antar panggilan ESPN (detik)
-MAX_PER_LEAGUE = 12  # maksimal pertandingan ditampilkan per liga
+DELAY = 2            # jeda antar panggilan API TheSportsDB (detik) — aman dari rate limit
+ESPN_DELAY = 0.4      # jeda antar panggilan ESPN (detik) — ESPN jauh lebih longgar dari TSDB
+MAX_PER_LEAGUE = 12   # maksimal pertandingan ditampilkan per liga
 
 # ============================================================
 # CABANG OLAHRAGA YANG DIPANTAU
-# (Volleyball ditambahkan karena pernah muncul di pesan bot sebelumnya.
-#  Tidak mau? Hapus "Volleyball" dari list SPORTS di bawah.)
+# Tiap cabang = 1 panggilan API per tanggal (irit & lengkap).
+# Nama harus sesuai TheSportsDB: Soccer, Basketball, Fighting, dll.
+# Mau tambah cabang? Tambahkan di list ini (mis. "Motorsport", "Tennis").
 # ============================================================
-SPORTS = ["Soccer", "Basketball", "Fighting", "Volleyball"]
+SPORTS = ["Soccer", "Basketball", "Fighting"]
 
+# Judul section per cabang (untuk tampilan pesan)
 SPORT_HEADER = {
     "Soccer": "⚽ *SEPAK BOLA*",
     "Basketball": "🏀 *BASKET*",
     "Fighting": "🥊 *TINJU & MMA*",
-    "Volleyball": "🏐 *VOLI*",
 }
 
 # ============================================================
-# AUTO-DETEKSI TURNAMEN (berdasarkan NAMA liga)
+# AUTO-DETEKSI TURNAMEN (berdasarkan NAMA liga, bukan ID)
+# Liga/turnamen yang namanya mengandung salah satu kata kunci di bawah
+# akan SELALU ditampilkan. Turnamen baru otomatis tertangkap.
 # ============================================================
 TOURNAMENT_KEYWORDS = [
     "world cup", "club world cup", "champions league", "europa league",
@@ -89,14 +132,19 @@ TOURNAMENT_KEYWORDS = [
     "super cup", "world championship", "grand prix", "finals",
 ]
 
+# Liga reguler favorit (tetap tampil walau bukan turnamen)
 FAVORITE_KEYWORDS = [
     "premier league", "la liga", "serie a", "bundesliga", "ligue 1",
-    "eredivisie", "primeira liga", "liga 1", "mls",
-    "nba", "euroleague",
-    "ufc", "one championship", "byon", "pfl", "bellator", "boxing",
-    "real american freestyle",
+    "eredivisie", "primeira liga", "liga 1", "mls",          # bola
+    "nba", "euroleague",                                     # basket
+    "ufc", "one championship", "byon", "pfl", "bellator", "boxing",  # fighting
+    "real american freestyle",  # RAF (gulat) — tampil kalau TheSportsDB
+                                 # suatu saat mendata promosi ini
 ]
 
+# Tim yang SELALU ditampilkan kalau bermain, di kompetisi apa pun
+# (mis. Timnas Indonesia main di kualifikasi Piala Dunia/Piala AFF, yang
+# nama liganya belum tentu mengandung kata "Indonesia")
 WATCH_TEAMS = [
     "indonesia",
 ]
@@ -106,17 +154,16 @@ WATCH_TEAMS = [
 # UTIL
 # ============================================================
 def get_json(url: str) -> dict:
-    """GET request dengan retry sederhana + log kegagalan yang jelas."""
+    """GET request dengan retry sederhana."""
     for attempt in range(2):
         try:
-            r = requests.get(url, timeout=25)
+            r = requests.get(url, timeout=15)
             if r.status_code == 200:
                 return r.json() or {}
-            print(f"   ⚠️ HTTP {r.status_code} untuk {url} -> retry {attempt + 1}/2")
+            print(f"   ⚠️ HTTP {r.status_code} -> retry {attempt + 1}/2")
         except Exception as e:
-            print(f"   ⚠️ {e} untuk {url} -> retry {attempt + 1}/2")
+            print(f"   ⚠️ {e} -> retry {attempt + 1}/2")
         time.sleep(3)
-    print(f"   ❌ GAGAL total mengambil: {url}")
     return {}
 
 
@@ -131,13 +178,17 @@ def classify_league(name: str) -> int:
 
 
 def is_watched_team(ev: dict) -> bool:
+    """True kalau salah satu tim di event ini ada di WATCH_TEAMS
+    (mis. Timnas Indonesia), apa pun nama liganya."""
     home = (ev.get("strHomeTeam") or "").lower()
     away = (ev.get("strAwayTeam") or "").lower()
     return any(t in home or t in away for t in WATCH_TEAMS)
 
 
 def event_wib_date(ev: dict) -> str | None:
-    """Tanggal WIB asli event (dari strTimestamp UTC)."""
+    """Tanggal WIB asli dari sebuah event (berdasarkan strTimestamp UTC).
+    Dipakai untuk menyaring ulang event agar masuk jendela tanggal yang
+    benar, terlepas dari bagaimana TheSportsDB mencatat 'dateEvent'-nya."""
     ts = ev.get("strTimestamp")
     if not ts:
         return None
@@ -149,6 +200,7 @@ def event_wib_date(ev: dict) -> str | None:
 
 
 def format_event(ev: dict) -> str:
+    """Ubah 1 event jadi 1 baris teks rapi (waktu WIB)."""
     home = ev.get("strHomeTeam") or ""
     away = ev.get("strAwayTeam") or ""
     title = f"{home} vs {away}" if home and away else (ev.get("strEvent") or "?")
@@ -158,7 +210,7 @@ def format_event(ev: dict) -> str:
     if score_h not in (None, "") and score_a not in (None, ""):
         return f"✅ {home} {score_h}–{score_a} {away}\n     (Selesai)"
 
-    ts = ev.get("strTimestamp")
+    ts = ev.get("strTimestamp")  # contoh: "2026-06-13T19:00:00"
     if ts:
         try:
             utc_dt = datetime.fromisoformat(ts.replace("Z", "")).replace(
@@ -172,28 +224,14 @@ def format_event(ev: dict) -> str:
     return f"🕐 {t} WIB\n     {title}"
 
 
-def _tokens(name: str) -> set[str]:
-    stop = {"fc", "afc", "cf", "sc", "ac", "as", "the"}
-    return {w for w in "".join(c if c.isalnum() else " " for c in (name or "").lower()).split() if w not in stop}
-
-
-def _dup_of_any(ev: dict, others: list[dict]) -> bool:
-    """True kalau 'ev' adalah laga yang sama dengan salah satu event di 'others'."""
-    d = event_wib_date(ev)
-    h, a = _tokens(ev.get("strHomeTeam")), _tokens(ev.get("strAwayTeam"))
-    if not h or not a:
-        return False
-    for o in others:
-        if event_wib_date(o) != d:
-            continue
-        if h & _tokens(o.get("strHomeTeam")) and a & _tokens(o.get("strAwayTeam")):
-            return True
-    return False
-
-
 def fetch_sport_window(sport: str, query_dates: list[str], keep_dates: set[str]) -> list[dict]:
-    """Ambil event TSDB untuk tanggal QUERY, simpan hanya yang tanggal
-    WIB-nya ada di KEEP_DATES. Dedupe berdasarkan idEvent."""
+    """Ambil event satu cabang olahraga untuk daftar tanggal QUERY (ke TSDB),
+    lalu HANYA SIMPAN event yang tanggal WIB aslinya ada di KEEP_DATES.
+    Dedupe berdasarkan idEvent.
+
+    Ini menangani kasus laga lewat tengah malam WIB yang oleh TSDB
+    tercatat di tanggal UTC (sehari sebelumnya) — supaya tidak hilang
+    dari jadwal."""
     seen, out = set(), []
     for d in query_dates:
         data = get_json(f"{TSDB}/eventsday.php?d={d}&s={sport}")
@@ -204,7 +242,7 @@ def fetch_sport_window(sport: str, query_dates: list[str], keep_dates: set[str])
 
             wib_date = event_wib_date(ev)
             if wib_date is not None and wib_date not in keep_dates:
-                continue
+                continue  # di luar jendela WIB yang kita mau -> skip
 
             if eid:
                 seen.add(eid)
@@ -214,14 +252,17 @@ def fetch_sport_window(sport: str, query_dates: list[str], keep_dates: set[str])
 
 
 def fetch_espn_ufc(keep_dates: set[str]) -> list[dict]:
-    """CADANGAN UFC dari ESPN (kalender seluruh musim, 1x panggilan)."""
+    """CADANGAN khusus UFC dari ESPN (gratis, tanpa key).
+    ESPN menyediakan daftar SELURUH event UFC musim ini di field
+    'calendar' (1x panggilan untuk semua tanggal). Kita ambil event
+    yang tanggalnya (dikonversi ke WIB) ada di 'keep_dates'."""
     out = []
     data = get_json(ESPN_UFC_URL)
     leagues = data.get("leagues") or []
     calendar = (leagues[0].get("calendar") if leagues else []) or []
 
     for item in calendar:
-        start = item.get("startDate")
+        start = item.get("startDate")  # contoh: "2026-06-15T03:00Z"
         if not start:
             continue
         try:
@@ -250,41 +291,85 @@ def fetch_espn_ufc(keep_dates: set[str]) -> list[dict]:
     return out
 
 
+def _parse_espn_datetime(date_str: str | None) -> datetime | None:
+    """Parse tanggal ESPN (mis. '2026-09-22T16:45Z', kadang tanpa detik)
+    jadi datetime UTC aware. Return None kalau gagal parse."""
+    if not date_str:
+        return None
+    s = date_str.replace("Z", "")
+    try:
+        return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
 def fetch_espn_soccer(query_dates: list[str], keep_dates: set[str]) -> list[dict]:
-    """SUMBER SEPAK BOLA dari ESPN. 1 panggilan per liga PER TANGGAL
-    (?dates=YYYYMMDD), lalu disaring ulang berdasarkan tanggal WIB asli.
-    Catatan: tanpa parameter dates, ESPN mengembalikan hari acak/terdekat,
-    jadi parameter dates WAJIB."""
-    out, seen = [], set()
-    for slug, lname in ESPN_SOCCER_LEAGUES.items():
-        for d in query_dates:
-            data = get_json(ESPN_SOCCER_URL.format(slug=slug, d=d.replace("-", "")))
-            for e in (data.get("events") or []):
-                eid = f"espn-{e.get('id')}"
-                ts = (e.get("date") or "").replace("Z", "")
-                if eid in seen or event_wib_date({"strTimestamp": ts}) not in keep_dates:
-                    continue
-                seen.add(eid)
+    """CADANGAN Sepak Bola dari ESPN (gratis, tanpa key).
 
-                comp = (e.get("competitions") or [{}])[0]
-                teams = {c.get("homeAway"): c for c in (comp.get("competitors") or [])}
-                status_type = (e.get("status") or {}).get("type") or {}
-                done = status_type.get("completed")
-                home_c = teams.get("home") or {}
-                away_c = teams.get("away") or {}
+    SELALU dijalankan (bukan hanya saat TheSportsDB kosong total) karena
+    TheSportsDB kunci publik "123" terbukti tidak konsisten: kadang cuma
+    sebagian liga yang hilang, kadang satu cabang olahraga kosong total
+    untuk suatu tanggal. Menyasar daftar liga favorit + turnamen utama
+    di ESPN_SOCCER_LEAGUES (1 panggilan API per liga, dengan rentang
+    tanggal query_dates dalam SATU kali panggilan per liga)."""
+    out = []
+    start = min(query_dates).replace("-", "")
+    end = max(query_dates).replace("-", "")
+    date_range = start if start == end else f"{start}-{end}"
 
-                out.append({
-                    "idEvent": eid,
-                    "strEvent": e.get("name") or "",
-                    "strHomeTeam": (home_c.get("team") or {}).get("displayName", ""),
-                    "strAwayTeam": (away_c.get("team") or {}).get("displayName", ""),
-                    "strLeague": lname,
-                    "strTimestamp": ts,
-                    "intHomeScore": home_c.get("score") if done else None,
-                    "intAwayScore": away_c.get("score") if done else None,
-                })
-            time.sleep(ESPN_DELAY)
+    for league_name, slug in ESPN_SOCCER_LEAGUES.items():
+        url = f"{ESPN_SOCCER_URL.format(league=slug)}?dates={date_range}"
+        data = get_json(url)
+        for ev in (data.get("events") or []):
+            dt = _parse_espn_datetime(ev.get("date"))
+            if dt is None:
+                continue
+            wib_date = dt.astimezone(WIB).strftime("%Y-%m-%d")
+            if wib_date not in keep_dates:
+                continue
+
+            comp = (ev.get("competitions") or [{}])[0]
+            competitors = comp.get("competitors") or []
+            home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+            away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+            home_name = (home.get("team") or {}).get("displayName", "")
+            away_name = (away.get("team") or {}).get("displayName", "")
+            if not home_name or not away_name:
+                continue
+
+            status_type = ((comp.get("status") or {}).get("type") or {})
+            completed = bool(status_type.get("completed"))
+            home_score = home.get("score") if completed else None
+            away_score = away.get("score") if completed else None
+
+            out.append({
+                "idEvent": f"espn-soccer-{ev.get('id')}",
+                "strEvent": ev.get("name") or f"{home_name} vs {away_name}",
+                "strHomeTeam": home_name,
+                "strAwayTeam": away_name,
+                "strLeague": league_name,
+                "strTimestamp": dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                "intHomeScore": home_score,
+                "intAwayScore": away_score,
+            })
+        time.sleep(ESPN_DELAY)
     return out
+
+
+def _dedupe_key(ev: dict) -> tuple:
+    """Kunci dedupe untuk gabungan event TSDB + ESPN: tim tuan rumah +
+    tim tamu + tanggal WIB (lowercase, biar tidak sensitif kapital)."""
+    return (
+        (ev.get("strHomeTeam") or "").strip().lower(),
+        (ev.get("strAwayTeam") or "").strip().lower(),
+        event_wib_date(ev),
+    )
 
 
 # ============================================================
@@ -302,7 +387,10 @@ def build_message() -> str:
     tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
 
+    # Yang kita TAMPILKAN di pesan: hari ini + besok (WIB)
     keep_dates = {today_str, tomorrow_str}
+    # Yang kita TANYAKAN ke API (TheSportsDB & ESPN): kemarin+hari ini+besok
+    # (jaga-jaga selisih pencatatan tanggal UTC vs WIB)
     query_dates = [yesterday_str, today_str, tomorrow_str]
 
     lines = [
@@ -316,8 +404,10 @@ def build_message() -> str:
         lines.append(f"{SPORT_HEADER.get(sport, sport)}")
         lines.append("───────────────────────")
         events = fetch_sport_window(sport, query_dates, keep_dates)
+        print(f"   ℹ️ {sport}: {len(events)} event dari TheSportsDB (sebelum cadangan ESPN)")
 
-        # CADANGAN UFC
+        # CADANGAN: kalau cabang Fighting dan TheSportsDB belum punya
+        # event UFC untuk jendela ini, coba ambil dari ESPN.
         if sport == "Fighting":
             has_ufc = any("ufc" in (ev.get("strLeague") or "").lower() for ev in events)
             if not has_ufc:
@@ -326,16 +416,25 @@ def build_message() -> str:
                     print(f"   ℹ️ +{len(espn_events)} event UFC dari ESPN (cadangan)")
                 events.extend(espn_events)
 
-        # SEPAK BOLA: ESPN dipakai untuk liga-liga besar (lebih andal),
-        # TSDB tetap dipakai untuk turnamen/liga lain & Timnas Indonesia.
+        # CADANGAN: Sepak Bola SELALU digabung dengan ESPN (liga favorit +
+        # turnamen utama), karena TheSportsDB kunci "123" terbukti kadang
+        # kosong total untuk cabang ini, bukan cuma "kadang hilang".
         if sport == "Soccer":
-            print(f"   ℹ️ Soccer: {len(events)} event dari TSDB (query={query_dates}, keep={sorted(keep_dates)})")
-            espn_ev = fetch_espn_soccer(query_dates, keep_dates)
-            print(f"   ℹ️ Soccer: {len(espn_ev)} laga dari ESPN")
-            # buang duplikat: laga TSDB yang sama dengan laga ESPN (tanggal WIB
-            # sama + kedua tim punya kata nama yang sama) tidak dipakai lagi
-            events = [ev for ev in events if not _dup_of_any(ev, espn_ev)] + espn_ev
+            espn_events = fetch_espn_soccer(query_dates, keep_dates)
+            existing_keys = {_dedupe_key(ev) for ev in events}
+            added = 0
+            for ev in espn_events:
+                key = _dedupe_key(ev)
+                if key not in existing_keys:
+                    events.append(ev)
+                    existing_keys.add(key)
+                    added += 1
+            print(f"   ℹ️ +{added} event Sepak Bola dari ESPN (liga favorit & turnamen, setelah dedupe)")
 
+        # 🔍 LOG DEBUG khusus turnamen besar Sepak Bola (cek di tab Actions
+        # kalau ada laga turnamen yang kelihatannya hilang dari pesan)
+        if sport == "Soccer":
+            print(f"   ℹ️ Soccer: {len(events)} event total (query={query_dates}, keep={sorted(keep_dates)})")
             for ev in events:
                 lg = ev.get("strLeague") or ""
                 if any(k in lg.lower() for k in TOURNAMENT_KEYWORDS):
@@ -347,6 +446,8 @@ def build_message() -> str:
             lg = ev.get("strLeague") or "Lainnya"
             by_league.setdefault(lg, []).append(ev)
 
+        # Untuk Soccer: hanya tampilkan turnamen + liga favorit (hindari spam
+        # ratusan laga liga kecil sedunia). Cabang lain: tampilkan semua.
         keep_others = sport != "Soccer"
 
         ranked = []
@@ -354,6 +455,9 @@ def build_message() -> str:
             rank = classify_league(lg)
 
             if rank == 2 and sport == "Soccer":
+                # Liga/turnamen ini bukan favorit untuk Sepak Bola.
+                # Tapi kalau Timnas Indonesia (atau tim di WATCH_TEAMS)
+                # bermain di sini, tetap tampilkan laga itu saja.
                 watched = [ev for ev in evs if is_watched_team(ev)]
                 if watched:
                     ranked.append((1, lg, watched))
@@ -363,7 +467,7 @@ def build_message() -> str:
                 continue
 
             ranked.append((rank, lg, evs))
-        ranked.sort(key=lambda x: (x[0], x[1]))
+        ranked.sort(key=lambda x: (x[0], x[1]))  # turnamen dulu, lalu abjad
 
         if not ranked:
             lines.append("Tidak ada pertandingan")
@@ -417,7 +521,7 @@ def send_to_telegram(text: str) -> bool:
 
 
 # ============================================================
-# MAIN
+# MAIN — jalan sekali lalu selesai
 # ============================================================
 if __name__ == "__main__":
     print(f"🏟️ Mengambil jadwal... ({datetime.now(WIB).strftime('%d-%m-%Y %H:%M WIB')})")
