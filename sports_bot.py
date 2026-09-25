@@ -22,14 +22,20 @@
       sebelumnya. Bot mengambil data kemarin+hari ini+besok,
       lalu MENYARING ulang berdasarkan tanggal WIB asli tiap laga —
       jadi laga seperti ini tidak hilang lagi.
-   7) SUMBER GANDA UNTUK SEPAK BOLA (BARU — 25 Sep 2026): TheSportsDB
-      kunci publik "123" TERBUKTI sering tidak mengembalikan data
-      sepak bola sama sekali untuk suatu tanggal (bukan cuma "kadang
-      hilang" seperti dugaan awal — bisa benar-benar KOSONG TOTAL).
-      Bot sekarang SELALU memanggil ESPN untuk daftar liga
-      favorit + turnamen utama (lihat ESPN_SOCCER_LEAGUES di bawah),
-      digabung dengan hasil TheSportsDB, dan otomatis dedupe
-      berdasarkan tim tuan rumah + tim tamu + tanggal WIB.
+   7) SUMBER GANDA UNTUK SEPAK BOLA (25 Sep 2026): TheSportsDB kunci
+      publik "123" TERBUKTI sering tidak mengembalikan data sepak bola
+      sama sekali untuk suatu tanggal. Bot sekarang SELALU memanggil
+      ESPN untuk daftar liga favorit + turnamen utama (lihat
+      ESPN_SOCCER_LEAGUES di bawah), digabung dengan hasil
+      TheSportsDB, dan otomatis dedupe berdasarkan tim tuan rumah +
+      tim tamu + tanggal WIB.
+   8) PESAN SELF-DIAGNOSTIC (BARU): kalau bagian Sepak Bola kosong,
+      pesan Telegram-nya sendiri sekarang menampilkan angka mentah
+      (berapa event ditemukan dari TheSportsDB vs ESPN SEBELUM
+      difilter liga favorit). Kalau angka ESPN-nya 0, itu tanda
+      panggilan API-nya gagal/diblokir — bukan sekadar "hari ini
+      libur". Ini supaya diagnosis tidak perlu buka log GitHub
+      Actions lagi.
 
  Script jalan SEKALI per eksekusi (ambil -> kirim -> selesai).
 =====================================================================
@@ -154,15 +160,18 @@ WATCH_TEAMS = [
 # UTIL
 # ============================================================
 def get_json(url: str) -> dict:
-    """GET request dengan retry sederhana."""
+    """GET request dengan retry sederhana. Header SENGAJA dibiarkan
+    default (tanpa User-Agent custom) — beberapa API publik (termasuk
+    ESPN) justru menolak User-Agent browser atau token custom pendek,
+    dan menerima request polos dari library seperti requests/curl."""
     for attempt in range(2):
         try:
             r = requests.get(url, timeout=15)
             if r.status_code == 200:
                 return r.json() or {}
-            print(f"   ⚠️ HTTP {r.status_code} -> retry {attempt + 1}/2")
+            print(f"   ⚠️ HTTP {r.status_code} pada {url} -> retry {attempt + 1}/2")
         except Exception as e:
-            print(f"   ⚠️ {e} -> retry {attempt + 1}/2")
+            print(f"   ⚠️ {e} pada {url} -> retry {attempt + 1}/2")
         time.sleep(3)
     return {}
 
@@ -313,11 +322,10 @@ def fetch_espn_soccer(query_dates: list[str], keep_dates: set[str]) -> list[dict
     """CADANGAN Sepak Bola dari ESPN (gratis, tanpa key).
 
     SELALU dijalankan (bukan hanya saat TheSportsDB kosong total) karena
-    TheSportsDB kunci publik "123" terbukti tidak konsisten: kadang cuma
-    sebagian liga yang hilang, kadang satu cabang olahraga kosong total
-    untuk suatu tanggal. Menyasar daftar liga favorit + turnamen utama
-    di ESPN_SOCCER_LEAGUES (1 panggilan API per liga, dengan rentang
-    tanggal query_dates dalam SATU kali panggilan per liga)."""
+    TheSportsDB kunci publik "123" terbukti tidak konsisten. Menyasar
+    daftar liga favorit + turnamen utama di ESPN_SOCCER_LEAGUES (1
+    panggilan API per liga, dengan rentang tanggal query_dates dalam
+    SATU kali panggilan per liga)."""
     out = []
     start = min(query_dates).replace("-", "")
     end = max(query_dates).replace("-", "")
@@ -406,6 +414,9 @@ def build_message() -> str:
         events = fetch_sport_window(sport, query_dates, keep_dates)
         print(f"   ℹ️ {sport}: {len(events)} event dari TheSportsDB (sebelum cadangan ESPN)")
 
+        tsdb_soccer_count = len(events)   # dipakai untuk pesan diagnostik kalau Soccer kosong
+        espn_soccer_raw_count = 0
+
         # CADANGAN: kalau cabang Fighting dan TheSportsDB belum punya
         # event UFC untuk jendela ini, coba ambil dari ESPN.
         if sport == "Fighting":
@@ -421,6 +432,7 @@ def build_message() -> str:
         # kosong total untuk cabang ini, bukan cuma "kadang hilang".
         if sport == "Soccer":
             espn_events = fetch_espn_soccer(query_dates, keep_dates)
+            espn_soccer_raw_count = len(espn_events)
             existing_keys = {_dedupe_key(ev) for ev in events}
             added = 0
             for ev in espn_events:
@@ -429,7 +441,10 @@ def build_message() -> str:
                     events.append(ev)
                     existing_keys.add(key)
                     added += 1
-            print(f"   ℹ️ +{added} event Sepak Bola dari ESPN (liga favorit & turnamen, setelah dedupe)")
+            print(
+                f"   ℹ️ +{added} event Sepak Bola dari ESPN "
+                f"({espn_soccer_raw_count} mentah sebelum dedupe, dari {len(ESPN_SOCCER_LEAGUES)} liga dicek)"
+            )
 
         # 🔍 LOG DEBUG khusus turnamen besar Sepak Bola (cek di tab Actions
         # kalau ada laga turnamen yang kelihatannya hilang dari pesan)
@@ -470,7 +485,17 @@ def build_message() -> str:
         ranked.sort(key=lambda x: (x[0], x[1]))  # turnamen dulu, lalu abjad
 
         if not ranked:
-            lines.append("Tidak ada pertandingan")
+            if sport == "Soccer":
+                # Diagnostik langsung di pesan: kalau ESPN raw count = 0,
+                # itu tanda panggilan API-nya gagal/diblokir -- bukan
+                # sekadar "hari ini tidak ada laga liga favorit".
+                lines.append(
+                    f"Tidak ada pertandingan liga favorit/turnamen hari ini\n"
+                    f"     (mentah: TSDB {tsdb_soccer_count} event, "
+                    f"ESPN {espn_soccer_raw_count} event dari {len(ESPN_SOCCER_LEAGUES)} liga dicek)"
+                )
+            else:
+                lines.append("Tidak ada pertandingan")
             continue
 
         for rank, lg, evs in ranked:
@@ -478,7 +503,7 @@ def build_message() -> str:
             lines.append(f"\n{tag}*{lg}*")
             for ev in evs[:MAX_PER_LEAGUE]:
                 lines.append(format_event(ev))
-                lines.append("")
+            lines.append("")  # 1 baris kosong per liga (bukan per pertandingan) -> pesan lebih pendek
 
     lines.append("═══════════════════════")
     lines.append("_Sumber: TheSportsDB + ESPN • Dikirim otomatis via GitHub Actions_ 🤖")
